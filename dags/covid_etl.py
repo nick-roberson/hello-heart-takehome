@@ -4,7 +4,7 @@ import logging
 import os
 import tempfile
 import uuid
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Dict
 
 import boto3
@@ -273,7 +273,7 @@ def covid_etl(run_id: str = str(uuid.uuid4())):
          20  longitude           69182 non-null  object
     """
 
-    @task()
+    @task(retries=3, retry_delay=timedelta(seconds=30))
     def extract(etl_run_id: str, data_path: str) -> str:
         """Extract task. Load data from CSV file into a DataFrame. Does some basic data cleaning and validation.
 
@@ -312,7 +312,7 @@ def covid_etl(run_id: str = str(uuid.uuid4())):
         # Return the S3 path
         return raw_s3_key
 
-    @task()
+    @task(retries=3, retry_delay=timedelta(seconds=30))
     def transform(etl_run_id: str, raw_s3_key: str) -> str:
         """Transform task. Split the DataFrame into chunks, transform each chunk, and combine them back.
 
@@ -355,7 +355,7 @@ def covid_etl(run_id: str = str(uuid.uuid4())):
         # Return the S3 path
         return processed_s3_key
 
-    @task()
+    @task(retries=3, retry_delay=timedelta(seconds=30))
     def load(etl_run_id: str, processed_s3_key: str):
         """Load task. Load the processed DataFrame into a database.
 
