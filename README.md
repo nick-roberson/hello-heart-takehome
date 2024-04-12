@@ -2,53 +2,25 @@
 
 Airflow ETL Assignment for Hello Heart. This project is a simple ETL pipeline that reads data from a CSV file, processes it using Airflow, and writes it to a MySQL database.
 
-## Start Up Airflow Server
+## LocalStack
 
-Note: This will only work with earlier versions of python, not the latest (3.10 and on).
+I setup a trial account on localstack, so I will use that for all the AWS Services that I will use 
+in order to complete this take home.
 
-The current path I have to Python 3.8 is installed at:
-```
-/opt/homebrew/opt/python@3.8/libexec/bin
-```
+## Setup Airflow Server
 
-Set AIRFLOW_HOME:
-```
-export AIRFLOW_HOME="/Users/nicholas/Code/airflow/Airflow/.venv/lib/python3.8/site-packages/airflow"
-```
-Initialize venv and install requirements:
-```
-$ python3.8 -m venv .venv
-$ source .venv/bin/activate
-(.venv) $ pip install --upgrade pip
-(.venv) $ pip install -r requirements.txt
-```
-Install Airflow Separately:
-```
-(.venv) $ AIRFLOW_VERSION=2.8.1 && \
-    PYTHON_VERSION="$(python --version | cut -d " " -f 2 | cut -d "." -f 1-2)" && \
-    CONSTRAINT_URL="https://raw.githubusercontent.com/apache/airflow/constraints-${AIRFLOW_VERSION}/constraints-${PYTHON_VERSION}.txt" && \
-    pip install "apache-airflow[async,postgres,google]==${AIRFLOW_VERSION}" --constraint "${CONSTRAINT_URL}"
-```
-Initialize Airflow Database w/ Admin User:
-```
-(.venv) $ airflow db init
-(.venv) $ airflow users create \
-    --username admin \
-    --firstname nick \
-    --lastname roberson \
-    --role Admin \
-    --email nicholas.roberson.95@gmail.com
+All steps to start up the Airflow server are in the `setup.sh` bash file. Run it like so:
+```bash
+bash setup.sh
 ```
 
-Start Airflow Server (Terminal Window 1):
-```
-(.venv) $ airflow webserver
-```
+This should set up the database as well as the webserver and scheduler. The webserver should be running on `localhost:8080`.
 
-Start Airflow Scheduler (Terminal Window 2):
-```
-(.venv) $ airflow scheduler
-```
+Once this is done you should be able to see the `CovidETL` DAG in the Airflow UI.
+
+## Running the ETL
+
+To run the ETL, simply trigger the `CovidETL` DAG in the Airflow UI. This will run the ETL pipeline and write the data to the MySQL database.
 
 ## Docs Source
 
