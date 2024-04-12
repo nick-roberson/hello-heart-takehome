@@ -4,8 +4,29 @@ Airflow ETL Assignment for Hello Heart. This project is a simple ETL pipeline th
 
 ## LocalStack
 
-I setup a trial account on localstack, so I will use that for all the AWS Services that I will use 
+I set up a trial account on localstack, so I will use that for all the AWS Services that I will use 
 in order to complete this take home.
+
+## Create S3 Bucket
+
+I will create a bucket in S3 to store the data from runs of the ETL pipeline. This will be used to store the raw data as well as the processed data.
+```bash
+awslocal s3api create-bucket --bucket hello-heart-covid-data
+```
+Confirm that the bucket was created by running:
+```bash
+awslocal s3api list-buckets | grep hello-heart-covid-data
+```
+
+For some reason I cant seem to use the `boto3` client with the localstack, so I will use the `awslocal` command line tool to interact with the S3 bucket in all the code. I think it requires a paid version but I am just running using the free tier.
+
+## Create SQL Database
+
+I was originally planning to use RDS, but it does not look like the localstack supports RDS on their free tier.
+So I will use a connection to my own local MySQL database. I will create a database called `hello_heart` and a table called `covid_data` to store the data from the ETL pipeline.
+
+
+```bash
 
 ## Setup Airflow Server
 
