@@ -1,8 +1,0 @@
-{
-    "engine": "aurora-postgresql", 
-    "username": "test-user",
-    "password": "test-password",
-    "host": "localhost",
-    "dbname": "covid",
-    "port": "4510"
-}
