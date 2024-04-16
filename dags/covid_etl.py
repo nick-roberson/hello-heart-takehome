@@ -4,31 +4,20 @@ import logging
 import os
 import tempfile
 import uuid
-from datetime import datetime, timedelta
+from concurrent.futures import ThreadPoolExecutor
+from datetime import timedelta
 from typing import Dict
 
-import boto3
 import pandas as pd
 import pendulum
 from airflow.decorators import dag, task
+from constants import (BUCKET, DATA_CSV, INSERT_CHUNKSIZE,
+                       PARQUET_FILE_PROCESSED, PARQUET_FILE_RAW)
 from db.models import Provider
-
-# Path to the CSV file
-DATA_CSV = "dags/data/COVID-19_Public_Therapeutic_Locator_20240412.csv"
-
-# Transform Constants
-TRANSFORM_CHUNKSIZE = 10000
-
-# Localstack S3 endpoint
-ENDPOINT_URL = "http://host.docker.internal:4566"
-
-BUCKET = "hello-heart-covid-data"
-
-# S3 file names and paths
-PARQUET_FILE_RAW = "covid_data_raw.parquet"
-PARQUET_FILE_PROCESSED = "covid_data_processed.parquet"
-PARQUET_FILE_FAILED_INSERTS = "failed_inserts.parquet"
-PARQUET_FILE_SUCCEEDED_INSERTS = "succeeded_inserts.parquet"
+from utils import (_combine_df, _split_df, _transform_df,
+                   get_localstack_dynamodb_resource, get_localstack_s3_client,
+                   log_df_info, process_failed_inserts,
+                   process_suceeded_inserts, s3_download, s3_exists, s3_upload)
 
 #################################################################
 # Logging                                                       #
@@ -51,203 +40,16 @@ def get_logger():
 
 logger = get_logger()
 
-
-#################################################################
-# Utils                                                         #
-#################################################################
-
-
-def parse_date(date_str: str) -> datetime:
-    """Parse date string"""
-    # Different date formats to try
-    formats_to_try = ["%m/%d/%Y %I:%M:%S %p", "%m/%d/%Y %H:%M:%S %p"]
-
-    # Try parsing the date string with each format
-    for format_str in formats_to_try:
-        try:
-            # Break out of loop once parsed successfully
-            return datetime.strptime(date_str, format_str)
-        except ValueError:
-            # If parsing fails for a format, try the next one
-            pass
-
-
-def log_df_info(df: pd.DataFrame):
-    """Log dataframe info"""
-    # Show some basic info about the dataframe
-    logger.info("DataFrame Info:")
-    logger.info(f"{df.info()}")
-    logger.info("DataFrame Head:")
-    logger.info(f"{df.head(10)}")
-
-    # Show info about rows and columns
-    logger.info("Rows Count: %s", df.shape[0])
-    logger.info("Columns Count: %s", df.shape[1])
-    logger.info("Columns: %s", df.columns.tolist())
-
-
-def get_localstack_s3_client():
-    """Get localstack S3 client"""
-    client = boto3.client(
-        "s3",
-        endpoint_url=ENDPOINT_URL,
-        aws_access_key_id="test",
-        aws_secret_access_key="test",
-        region_name="us-east-1",
-    )
-    return client
-
-
-def get_localstack_dynamodb_resource():
-    """Get localstack DynamoDB client"""
-    resource = boto3.resource(
-        "dynamodb",
-        endpoint_url=ENDPOINT_URL,
-        aws_access_key_id="test",
-        aws_secret_access_key="test",
-        region_name="us-east-1",
-    )
-    return resource
-
-
-def s3_exists(client, bucket: str, key: str):
-    """Check if a file exists in S3"""
-    try:
-        client.head_object(Bucket=bucket, Key=key)
-        logging.info(f"File {key} exists in S3")
-        return True
-    except BaseException as e:
-        logging.info(f"File {key} does not exist in S3, error: {e}")
-        return False
-
-
-def s3_upload(client, file_path: str, bucket: str, key: str):
-    """Upload a file to S3"""
-    try:
-        client.upload_file(file_path, bucket, key)
-        logging.info(f"Uploaded {file_path} to s3://{bucket}/{key}")
-    except BaseException as e:
-        logging.error(f"Failed to upload {file_path} to S3, error: {e}")
-        raise e
-
-
-def s3_download(client, bucket: str, key: str, file_path: str):
-    """Download a file from S3"""
-    try:
-        client.download_file(bucket, key, file_path)
-        logging.info(f"Downloaded s3://{bucket}/{key} to {file_path}")
-    except BaseException as e:
-        logging.error(
-            f"Failed to download s3://{bucket}/{key} to {file_path}, error: {e}"
-        )
-        raise e
-
-
-def _split_df(
-    covid_df: pd.DataFrame, chunk_size: int = TRANSFORM_CHUNKSIZE
-) -> Dict[str, pd.DataFrame]:
-    """Split task helper function. Split the DataFrame into chunks of 10000.
-
-    Args:
-        covid_df (pd.DataFrame): DataFrame to split
-        chunk_size (int): Size of each chunk
-    Returns:
-        Dict[str, pd.DataFrame]: Split DataFrames
-    """
-    # Split the dataframe into chunks of 10000
-    chunks = {}
-    for i, chunk in enumerate(covid_df.groupby(covid_df.index // chunk_size)):
-        chunks[f"chunk_{i}"] = chunk[1]
-
-    # Return the chunks
-    return chunks
-
-
-def _combine_df(covid_dfs: Dict[str, pd.DataFrame]) -> pd.DataFrame:
-    """Combine task helper function. Combine the DataFrames into a single DataFrame.
-
-    Args:
-        covid_dfs (Dict[str, pd.DataFrame]): DataFrames to combine
-    Returns:
-        pd.DataFrame: Combined DataFrame
-    """
-    # combine the dataframes
-    return pd.concat(covid_dfs.values())
-
-
-def _transform_df(covid_df: pd.DataFrame) -> pd.DataFrame:
-    """Transform task helper function. Transform the DataFrame.
-
-    Args:
-        covid_df (pd.DataFrame): DataFrame to transform
-    Returns:
-        pd.DataFrame: Processed DataFrame
-    """
-    # check if data is present
-    if covid_df.empty:
-        raise ValueError("No data present")
-
-    # --------- Feature Tuning  ---------
-
-    # Extract relevant information from addresses
-    covid_df["Street"] = covid_df["Address1"].str.split(",").str[0]
-    covid_df["City"] = covid_df["City"]
-    covid_df["State"] = covid_df["State Code"]
-    covid_df["Zip Code"] = covid_df["Zip"]
-
-    # Parsing dates to datetime and then back to string
-    covid_df["Last Report Date"] = covid_df["Last Report Date"].apply(parse_date)
-    covid_df["Last Report Date"] = covid_df["Last Report Date"].dt.strftime("%Y-%m-%d")
-
-    # Extract provider type
-    covid_df["Provider Type"] = covid_df["Provider Name"].str.split(" ").str[0]
-
-    # --------- Data Enrichment ---------
-
-    # Geocoding (assuming Geocoded Address is in WKT format)
-    covid_df["Latitude"] = covid_df["Geocoded Address"].apply(
-        lambda x: x._split_df(" ")[1][1:] if x else None
-    )
-    covid_df["Longitude"] = covid_df["Geocoded Address"].apply(
-        lambda x: x.split(" ")[2][:-1] if x else None
-    )
-
-    # --------- Data Validation ---------
-
-    # Check for missing values and log, but don't raise an error
-    missing_values = covid_df.isnull().sum()
-    if missing_values.any():
-        logging.warning(
-            f"Missing values found in columns: {missing_values[missing_values > 0]}"
-        )
-
-    # Convert float columns to string (to prepare for DynamoDB)
-    float_cols = covid_df.select_dtypes(include=["float"]).columns
-    covid_df[float_cols] = covid_df[float_cols].astype(str)
-
-    # --------- Data Cleaning ---------
-
-    # Rename columns to snake case and lowercase for consistency
-    def clean_col_name(col: str) -> str:
-        """Simple clean the column name of any non-standard characters."""
-        cleaned_col = col.lower().replace(" ", "_")
-        cleaned_col = "".join(e for e in cleaned_col if e.isalnum() or e == "_")
-        return cleaned_col
-
-    column_mapping = {col: clean_col_name(col) for col in covid_df.columns}
-    covid_df = covid_df.rename(columns=column_mapping)
-    return covid_df
-
-
 #################################################################
 # Airflow                                                       #
 #################################################################
 
 
 @dag(
-    schedule=None,
-    start_date=pendulum.datetime(2024, 1, 1, tz="UTC"),
-    catchup=False,
+    # Run once a day, this data may not be updated frequently (according to the source)
+    schedule="0 0 * * *",
+    # Start the date after I complete this
+    start_date=pendulum.datetime(2024, 4, 15, tz="UTC"),
     tags=["covid19", "etl"],
 )
 def covid_etl(run_id: str = str(uuid.uuid4())):
@@ -318,8 +120,8 @@ def covid_etl(run_id: str = str(uuid.uuid4())):
         """Transform task. Split the DataFrame into chunks, transform each chunk, and combine them back.
 
         Notes:
-            - This task could be parallelized for larger datasets. Could not get parallelism to work in my standalone
-                Airflow instance.
+            - This task could be parallelized in a better way for larger datasets. Here I'm just using ThreadPoolExecutor
+            to process the chunks in parallel.
 
         Args:
             etl_run_id (str): Unique run ID
@@ -349,10 +151,17 @@ def covid_etl(run_id: str = str(uuid.uuid4())):
 
             # Split, transform, and combine the data
             covid_df = pd.read_parquet(raw_local_path)
-            processed_dfs = {
-                k: _transform_df(v) for k, v in _split_df(covid_df).items()
-            }
-            covid_df = _combine_df(processed_dfs)
+
+            # Split the data into chunks, transform, and combine
+            split_dfs = _split_df(covid_df)
+
+            # Process chunks in parallel
+            with ThreadPoolExecutor(max_workers=10) as executor:
+                results = executor.map(_transform_df, split_dfs)
+                transformed_chunks = list(results)
+
+            # Combine the transformed dataframes
+            covid_df = _combine_df(transformed_chunks)
 
             # Push the processed dataframe back to S3
             processed_local_path = os.path.join(tmpdir, PARQUET_FILE_PROCESSED)
@@ -398,14 +207,15 @@ def covid_etl(run_id: str = str(uuid.uuid4())):
         providers_table = dynamo_client.Table("providers")
 
         failed_inserts, succeeded_inserts = [], []
-        chunks = _split_df(covid_df, chunk_size=1000)
+        chunks = _split_df(covid_df, chunk_size=INSERT_CHUNKSIZE)
         total_chunks = len(chunks)
 
         # Insert the data into the DynamoDB table
-        for index, chunk in chunks.items():
+        for index, chunk in enumerate(chunks):
             logging.info(
-                f"Inserting chunk {index}/{total_chunks} into DynamoDB of size {len(chunk)}"
+                f"Starting chunk {index}/{total_chunks} into DynamoDB (size {INSERT_CHUNKSIZE})"
             )
+            start_time = pendulum.now()
 
             # Process the chunk and insert into DynamoDB
             with providers_table.batch_writer() as batch:
@@ -424,43 +234,18 @@ def covid_etl(run_id: str = str(uuid.uuid4())):
                         )
                         pass
 
+            duration = (pendulum.now() - start_time).total_seconds()
+            logging.info(f"Chunk {index}/{total_chunks} inserted in {duration}s")
+
         result = {}
+
         # Log failed inserts and historize them in S3
         if failed_inserts:
-            logger.error(f"Failed to insert {len(failed_inserts)} models")
-            # Push the failed inserts to S3 as a parquet file
-            failed_inserts_df = pd.DataFrame(failed_inserts)
-            failed_inserts_path = os.path.join(tmpdir, PARQUET_FILE_FAILED_INSERTS)
-            failed_inserts_df.to_parquet(failed_inserts_path)
-            failed_inserts_key = f"{etl_run_id}/{PARQUET_FILE_FAILED_INSERTS}"
-            s3_upload(client, failed_inserts_path, BUCKET, failed_inserts_key)
-
-            # Update the result with the S3 path and count
-            result["failed_inserts_path"] = f"s3://{BUCKET}/{failed_inserts_key}"
-            result["failed_inserts_count"] = len(failed_inserts)
-            logger.info(
-                f"Uploaded failed inserts to S3: bucket={BUCKET}, key={failed_inserts_key}"
-            )
+            process_failed_inserts(client, failed_inserts, etl_run_id, result)
 
         # Log successful inserts and historize them in S3
         if succeeded_inserts:
-            logger.info(f"Successfully inserted {len(succeeded_inserts)} models")
-
-            # Push the successful inserts to S3 as a parquet file
-            succeeded_inserts_df = pd.DataFrame(succeeded_inserts)
-            succeeded_inserts_path = os.path.join(
-                tmpdir, PARQUET_FILE_SUCCEEDED_INSERTS
-            )
-            succeeded_inserts_df.to_parquet(succeeded_inserts_path)
-            succeeded_inserts_key = f"{etl_run_id}/{PARQUET_FILE_SUCCEEDED_INSERTS}"
-            s3_upload(client, succeeded_inserts_path, BUCKET, succeeded_inserts_key)
-
-            # Update the result with the S3 path and count
-            result["succeeded_inserts_path"] = f"s3://{BUCKET}/{succeeded_inserts_key}"
-            result["succeeded_inserts_count"] = len(succeeded_inserts)
-            logger.info(
-                f"Uploaded successful inserts to S3: bucket={BUCKET}, key={succeeded_inserts_key}"
-            )
+            process_suceeded_inserts(client, succeeded_inserts, etl_run_id, result)
 
         return result
 

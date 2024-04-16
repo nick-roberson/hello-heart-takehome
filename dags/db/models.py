@@ -9,7 +9,7 @@ class ProviderBase(BaseModel):
     # Original fields
     provider_name: str
     address1: str
-    address2: Optional[str] = None  # Optional field
+    address2: Optional[str] = None
     city: str
     county: str
     state_code: str
