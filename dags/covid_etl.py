@@ -143,7 +143,7 @@ def s3_download(client, bucket: str, key: str, file_path: str):
         raise e
 
 
-def split(
+def _split_df(
     covid_df: pd.DataFrame, chunk_size: int = TRANSFORM_CHUNKSIZE
 ) -> Dict[str, pd.DataFrame]:
     """Split task helper function. Split the DataFrame into chunks of 10000.
@@ -163,7 +163,7 @@ def split(
     return chunks
 
 
-def combine(covid_dfs: Dict[str, pd.DataFrame]) -> pd.DataFrame:
+def _combine_df(covid_dfs: Dict[str, pd.DataFrame]) -> pd.DataFrame:
     """Combine task helper function. Combine the DataFrames into a single DataFrame.
 
     Args:
@@ -175,7 +175,7 @@ def combine(covid_dfs: Dict[str, pd.DataFrame]) -> pd.DataFrame:
     return pd.concat(covid_dfs.values())
 
 
-def _transform(covid_df: pd.DataFrame) -> pd.DataFrame:
+def _transform_df(covid_df: pd.DataFrame) -> pd.DataFrame:
     """Transform task helper function. Transform the DataFrame.
 
     Args:
@@ -206,7 +206,7 @@ def _transform(covid_df: pd.DataFrame) -> pd.DataFrame:
 
     # Geocoding (assuming Geocoded Address is in WKT format)
     covid_df["Latitude"] = covid_df["Geocoded Address"].apply(
-        lambda x: x.split(" ")[1][1:] if x else None
+        lambda x: x._split_df(" ")[1][1:] if x else None
     )
     covid_df["Longitude"] = covid_df["Geocoded Address"].apply(
         lambda x: x.split(" ")[2][:-1] if x else None
@@ -349,8 +349,10 @@ def covid_etl(run_id: str = str(uuid.uuid4())):
 
             # Split, transform, and combine the data
             covid_df = pd.read_parquet(raw_local_path)
-            processed_dfs = {k: _transform(v) for k, v in split(covid_df).items()}
-            covid_df = combine(processed_dfs)
+            processed_dfs = {
+                k: _transform_df(v) for k, v in _split_df(covid_df).items()
+            }
+            covid_df = _combine_df(processed_dfs)
 
             # Push the processed dataframe back to S3
             processed_local_path = os.path.join(tmpdir, PARQUET_FILE_PROCESSED)
@@ -361,7 +363,7 @@ def covid_etl(run_id: str = str(uuid.uuid4())):
         return processed_s3_key
 
     @task(retries=3, retry_delay=timedelta(seconds=10))
-    def load(etl_run_id: str, processed_s3_key: str):
+    def load(etl_run_id: str, processed_s3_key: str) -> Dict:
         """Load task. Load the processed DataFrame into a database.
 
         Notes:
@@ -389,62 +391,78 @@ def covid_etl(run_id: str = str(uuid.uuid4())):
             s3_download(client, BUCKET, processed_s3_key, processed_local_path)
             # Load the processed data into a dataframe
             covid_df = pd.read_parquet(processed_local_path)
-
-            # Show some basic info about the dataframe
             log_df_info(covid_df)
 
-            # Load the data into the DynamoDB table
-            dynamo_client = get_localstack_dynamodb_resource()
-            providers_table = dynamo_client.Table("providers")
+        # Load the data into the DynamoDB table
+        dynamo_client = get_localstack_dynamodb_resource()
+        providers_table = dynamo_client.Table("providers")
 
-            failed_inserts, succeeded_inserts = [], []
-            chunks = split(covid_df, chunk_size=1000)
-            total_chunks = len(chunks)
+        failed_inserts, succeeded_inserts = [], []
+        chunks = _split_df(covid_df, chunk_size=1000)
+        total_chunks = len(chunks)
 
-            # Insert the data into the DynamoDB table
-            for index, chunk in chunks.items():
-                logging.info(
-                    f"Inserting chunk {index}/{total_chunks} into DynamoDB of size {len(chunk)}"
-                )
+        # Insert the data into the DynamoDB table
+        for index, chunk in chunks.items():
+            logging.info(
+                f"Inserting chunk {index}/{total_chunks} into DynamoDB of size {len(chunk)}"
+            )
 
-                # Process the chunk and insert into DynamoDB
-                with providers_table.batch_writer() as batch:
-                    insert_models = [
-                        Provider(**row) for row in chunk.to_dict(orient="records")
-                    ]
-                    for model in insert_models:
-                        model_dict = model.dict()
-                        try:
-                            batch.put_item(Item=model_dict)
-                            succeeded_inserts.append(model_dict)
-                        except Exception as e:
-                            failed_inserts.append(model_dict)
-                            logger.error(
-                                f"Failed to insert model: {model_dict}, error: {e}"
-                            )
-                            pass
+            # Process the chunk and insert into DynamoDB
+            with providers_table.batch_writer() as batch:
+                insert_models = [
+                    Provider(**row) for row in chunk.to_dict(orient="records")
+                ]
+                for model in insert_models:
+                    model_dict = model.dict()
+                    try:
+                        batch.put_item(Item=model_dict)
+                        succeeded_inserts.append(model_dict)
+                    except Exception as e:
+                        failed_inserts.append(model_dict)
+                        logger.error(
+                            f"Failed to insert model: {model_dict}, error: {e}"
+                        )
+                        pass
 
-            # Log failed inserts and historize them in S3
-            if failed_inserts:
-                logger.error(f"Failed to insert {len(failed_inserts)} models")
-                # Push the failed inserts to S3 as a parquet file
-                failed_inserts_df = pd.DataFrame(failed_inserts)
-                failed_inserts_path = os.path.join(tmpdir, PARQUET_FILE_FAILED_INSERTS)
-                failed_inserts_df.to_parquet(failed_inserts_path)
-                failed_inserts_key = f"{etl_run_id}/{PARQUET_FILE_FAILED_INSERTS}"
-                s3_upload(client, failed_inserts_path, BUCKET, failed_inserts_key)
+        result = {}
+        # Log failed inserts and historize them in S3
+        if failed_inserts:
+            logger.error(f"Failed to insert {len(failed_inserts)} models")
+            # Push the failed inserts to S3 as a parquet file
+            failed_inserts_df = pd.DataFrame(failed_inserts)
+            failed_inserts_path = os.path.join(tmpdir, PARQUET_FILE_FAILED_INSERTS)
+            failed_inserts_df.to_parquet(failed_inserts_path)
+            failed_inserts_key = f"{etl_run_id}/{PARQUET_FILE_FAILED_INSERTS}"
+            s3_upload(client, failed_inserts_path, BUCKET, failed_inserts_key)
 
-            # Log successful inserts and historize them in S3
-            if succeeded_inserts:
-                logger.info(f"Successfully inserted {len(succeeded_inserts)} models")
-                # Push the successful inserts to S3 as a parquet file
-                succeeded_inserts_df = pd.DataFrame(succeeded_inserts)
-                succeeded_inserts_path = os.path.join(
-                    tmpdir, PARQUET_FILE_SUCCEEDED_INSERTS
-                )
-                succeeded_inserts_df.to_parquet(succeeded_inserts_path)
-                succeeded_inserts_key = f"{etl_run_id}/{PARQUET_FILE_SUCCEEDED_INSERTS}"
-                s3_upload(client, succeeded_inserts_path, BUCKET, succeeded_inserts_key)
+            # Update the result with the S3 path and count
+            result["failed_inserts_path"] = f"s3://{BUCKET}/{failed_inserts_key}"
+            result["failed_inserts_count"] = len(failed_inserts)
+            logger.info(
+                f"Uploaded failed inserts to S3: bucket={BUCKET}, key={failed_inserts_key}"
+            )
+
+        # Log successful inserts and historize them in S3
+        if succeeded_inserts:
+            logger.info(f"Successfully inserted {len(succeeded_inserts)} models")
+
+            # Push the successful inserts to S3 as a parquet file
+            succeeded_inserts_df = pd.DataFrame(succeeded_inserts)
+            succeeded_inserts_path = os.path.join(
+                tmpdir, PARQUET_FILE_SUCCEEDED_INSERTS
+            )
+            succeeded_inserts_df.to_parquet(succeeded_inserts_path)
+            succeeded_inserts_key = f"{etl_run_id}/{PARQUET_FILE_SUCCEEDED_INSERTS}"
+            s3_upload(client, succeeded_inserts_path, BUCKET, succeeded_inserts_key)
+
+            # Update the result with the S3 path and count
+            result["succeeded_inserts_path"] = f"s3://{BUCKET}/{succeeded_inserts_key}"
+            result["succeeded_inserts_count"] = len(succeeded_inserts)
+            logger.info(
+                f"Uploaded successful inserts to S3: bucket={BUCKET}, key={succeeded_inserts_key}"
+            )
+
+        return result
 
     # 1. Load data from file (S3 used as cache)
     raw_s3_key = extract(run_id, DATA_CSV)
