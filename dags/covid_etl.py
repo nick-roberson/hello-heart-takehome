@@ -16,27 +16,8 @@ from constants import (BUCKET, DATA_CSV, INSERT_CHUNKSIZE,
 from db.models import Provider
 from utils import (_combine_df, _split_df, _transform_df,
                    get_localstack_dynamodb_resource, get_localstack_s3_client,
-                   log_df_info, process_failed_inserts,
+                   get_logger, log_df_info, process_failed_inserts,
                    process_suceeded_inserts, s3_download, s3_exists, s3_upload)
-
-#################################################################
-# Logging                                                       #
-#################################################################
-
-
-def setup_logging():
-    """Init some basic logging configuration"""
-    logging.basicConfig(
-        level=logging.INFO,
-        format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
-    )
-
-
-def get_logger():
-    """Get logger"""
-    setup_logging()
-    return logging.getLogger(__name__)
-
 
 logger = get_logger()
 
